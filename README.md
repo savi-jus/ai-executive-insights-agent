@@ -45,27 +45,27 @@ Ask questions such as:
 _________________________________________________________________________________________________________________________________
 ## Architecture
 ┌─────────────────────┐
-│ Upload CSV / Excel  │
+│ Upload CSV / Excel                       │
 └──────────┬──────────┘
-           │
-           ▼
+                             │
+                            ▼
 ┌─────────────────────┐
-│ Data Profiling      │
-│ Pandas Analysis     │
+│ Data Profiling                                │
+│ Pandas Analysis                             │
 └──────────┬──────────┘
-           │
-           ▼
+                             │
+                            ▼
 ┌─────────────────────┐
-│ AI Agent            │
-│ OpenAI API          │
+│ AI Agent                                       │
+│ OpenAI API                                   │
 └──────────┬──────────┘
-           │
-           ▼
+                             │
+                            ▼
 ┌─────────────────────┐
-│ Executive Insights  │
-│ Trends              │
-│ Risks               │
-│ Recommendations     │
+│ Executive Insights                          │
+│ Trends                                           │
+│ Risks                                             │
+│ Recommendations                        │
 └─────────────────────┘
 _________________________________________________________________________________________________________________________________
 ## Project Structure
