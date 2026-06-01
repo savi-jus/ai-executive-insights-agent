@@ -44,53 +44,10 @@ Ask questions such as:
 - Business performance summaries
 _________________________________________________________________________________________________________________________________
 ## Architecture
-┌─────────────────────┐
-│ Upload CSV / Excel                       │
-└──────────┬──────────┘
-                             │
-                            ▼
-┌─────────────────────┐
-│ Data Profiling                                │
-│ Pandas Analysis                             │
-└──────────┬──────────┘
-                             │
-                            ▼
-┌─────────────────────┐
-│ AI Agent                                       │
-│ OpenAI API                                   │
-└──────────┬──────────┘
-                             │
-                            ▼
-┌─────────────────────┐
-│ Executive Insights                          │
-│ Trends                                           │
-│ Risks                                             │
-│ Recommendations                        │
-└─────────────────────┘
+<img width="217" height="574" alt="image" src="https://github.com/user-attachments/assets/3dfc39b4-a26a-475f-810d-88693e3401d5" />
 _________________________________________________________________________________________________________________________________
 ## Project Structure
-
-executive-insights-agent/
-│
-├── app.py
-├── requirements.txt
-├── .env
-│
-├── agents/
-│   └── insight_agent.py
-│
-├── tools/
-│   ├── data_loader.py
-│   ├── kpi_detector.py
-│   ├── chart_tool.py
-│   └── trend_analysis.py
-│
-├── prompts/
-│   └── executive_prompt.txt
-│
-├── data/
-│
-└── README.md
+<img width="267" height="534" alt="image" src="https://github.com/user-attachments/assets/3a65c068-8a84-4452-b8d4-6f19d174df95" />
 _________________________________________________________________________________________________________________________________
 ## Technology Stack
 ### Programming Language
