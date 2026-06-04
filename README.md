@@ -1,6 +1,6 @@
 # Executive Insights AI Agent
 
-An AI-powered business intelligence agent that analyzes datasets, identifies trends, detects risks, and generates executive-level insights from CSV and Excel files.
+An AI-powered business intelligence agent that analyzes datasets, identifies trends, detects risks, and generates executive-level insights from CSV and Excel files. Link to the tool -> https://ai-executive-insights.streamlit.app/
 
 The goal of this project is to help decision-makers quickly understand business performance without manually exploring raw data.
 
@@ -88,8 +88,6 @@ flowchart LR
 
 ## Architecture
 
-<img width="217" height="574" alt="Architecture diagram" src="https://github.com/user-attachments/assets/3dfc39b4-a26a-475f-810d-88693e3401d5" />
-
 ## Project structure
 
 ```
@@ -110,8 +108,6 @@ ai-executive-insights-agent/
 ├── uv.lock
 └── README.md
 ```
-
-<img width="267" height="534" alt="Project structure diagram" src="https://github.com/user-attachments/assets/3a65c068-8a84-4452-b8d4-6f19d174df95" />
 
 ## Technology stack
 
