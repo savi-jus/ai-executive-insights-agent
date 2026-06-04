@@ -29,10 +29,10 @@ if uploaded_file:
     st.write(insights)
 
     # Generate chart
-    fig = sales_chart(df)
+    #fig = sales_chart(df)
 
     # Display chart
-    st.plotly_chart(fig)
+   # st.plotly_chart(fig)
 
 else:
     st.info("Please upload a file to begin analysis.")
