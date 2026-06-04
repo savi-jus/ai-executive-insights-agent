@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-client = OpenAI(api_key=os.getenv("API_KEY"))
+client = OpenAI(api_key=os.getenv("API_KOPENAI_API_KEYEY"))
 
 
 def generate_insights(profile, sample_data):
@@ -27,7 +27,7 @@ def generate_insights(profile, sample_data):
     """
 
     response = client.chat.completions.create(
-        model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}]
+        model=os.getenv("INSIGHTS_MODEL"), messages=[{"role": "user", "content": prompt}]
     )
 
     return response.choices[0].message.content
