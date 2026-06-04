@@ -1,3 +1,5 @@
+"""Schema builders and column heuristics for chart recommendation and rendering."""
+
 import json
 import re
 from datetime import date, datetime
@@ -5,6 +7,7 @@ from datetime import date, datetime
 import numpy as np
 import pandas as pd
 
+# Column names that likely hold record IDs, not metrics
 ID_COLUMN_PATTERN = re.compile(
     r"(^id$|_id$|^id_|uuid|guid|emp.?id|employee.?id|user.?id|"
     r"order.?id|customer.?id|account.?id|record.?id)",
@@ -26,6 +29,7 @@ HEADCOUNT_TITLE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Synthetic datetime column created when Year and Month exist separately
 PERIOD_COLUMN = "_period"
 
 
@@ -51,15 +55,18 @@ def to_json_safe(obj):
 
 
 def looks_like_id(column_name: str) -> bool:
+    """Heuristic: column name matches common ID patterns."""
     normalized = column_name.strip().replace(" ", "")
     return bool(ID_COLUMN_PATTERN.search(normalized) or ID_COLUMN_PATTERN.search(column_name))
 
 
 def is_numeric_series(series: pd.Series) -> bool:
+    """True if the series has a numeric dtype."""
     return pd.api.types.is_numeric_dtype(series)
 
 
 def find_year_month_columns(df: pd.DataFrame) -> tuple[str | None, str | None]:
+    """Detect separate Year and Month columns by name."""
     year_col = month_col = None
     for col in df.columns:
         name = col.lower().strip()
@@ -71,6 +78,7 @@ def find_year_month_columns(df: pd.DataFrame) -> tuple[str | None, str | None]:
 
 
 def is_year_like_column(column: str, series: pd.Series) -> bool:
+    """True if the column name or value range looks like calendar years."""
     if "year" in column.lower():
         return True
     if is_numeric_series(series):
@@ -82,11 +90,13 @@ def is_year_like_column(column: str, series: pd.Series) -> bool:
 
 
 def is_month_like_column(column: str) -> bool:
+    """True if the column name looks like a month field."""
     name = column.lower().strip()
     return name in ("month", "mo", "mnth") or name.endswith(" month")
 
 
 def build_period_series(df: pd.DataFrame, year_col: str, month_col: str) -> pd.Series:
+    """Combine Year + Month into a datetime series (first of month)."""
     years = pd.to_numeric(df[year_col], errors="coerce").astype("Int64")
     months = pd.to_numeric(df[month_col], errors="coerce").astype("Int64")
     labels = years.astype(str) + "-" + months.astype(str).str.zfill(2) + "-01"
@@ -94,18 +104,22 @@ def build_period_series(df: pd.DataFrame, year_col: str, month_col: str) -> pd.S
 
 
 def title_implies_metric_trend(title: str) -> bool:
+    """Chart title suggests summing a metric over time (not row counts)."""
     return bool(METRIC_TREND_TITLE_PATTERN.search(title))
 
 
 def title_implies_headcount_trend(title: str) -> bool:
+    """Chart title suggests counting rows (hiring/headcount) over time."""
     return bool(HEADCOUNT_TITLE_PATTERN.search(title))
 
 
 def find_metric_column_for_title(df: pd.DataFrame, title: str) -> str | None:
+    """Guess the best numeric metric column from chart title and df columns."""
     title_lower = title.lower()
     year_col, month_col = find_year_month_columns(df)
     skip = {c for c in (year_col, month_col) if c}
 
+    # Prefer columns whose name appears in the chart title
     direct = []
     for col in df.columns:
         if col in skip or not is_numeric_series(df[col]) or looks_like_id(col):
@@ -122,6 +136,7 @@ def find_metric_column_for_title(df: pd.DataFrame, title: str) -> str | None:
     if direct:
         return direct[0]
 
+    # Fallback: known metric keywords in column names
     for col in df.columns:
         if col in skip or not is_numeric_series(df[col]):
             continue
@@ -140,6 +155,7 @@ def find_metric_column_for_title(df: pd.DataFrame, title: str) -> str | None:
 
 
 def is_datetime_series(series: pd.Series) -> bool:
+    """True for datetime dtypes or object columns that mostly parse as dates."""
     if pd.api.types.is_datetime64_any_dtype(series):
         return True
     if series.dtype == object:
@@ -149,6 +165,7 @@ def is_datetime_series(series: pd.Series) -> bool:
 
 
 def column_metadata(df: pd.DataFrame, column: str) -> dict:
+    """Per-column stats sent to the LLM in the chart recommendation schema."""
     series = df[column]
     nunique = int(series.nunique(dropna=True))
     metadata = {
@@ -183,6 +200,7 @@ def column_metadata(df: pd.DataFrame, column: str) -> dict:
 
 
 def build_chart_schema(df: pd.DataFrame) -> dict:
+    """Full dataset description for the chart recommender prompt (columns + hints + samples)."""
     columns = [column_metadata(df, col) for col in df.columns]
     year_col, month_col = find_year_month_columns(df)
     hints: dict = {}

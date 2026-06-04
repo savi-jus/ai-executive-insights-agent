@@ -1,3 +1,9 @@
+"""Streamlit dashboard for Executive Insights.
+
+Upload a CSV or Excel file to profile the data, generate AI-written executive
+insights, and display recommended charts in a tabbed layout.
+"""
+
 import streamlit as st
 import pandas as pd
 
@@ -7,6 +13,7 @@ from tools.charts_renderer import render_chart
 from tools.chart_recommender import recommend_charts
 from tools.chart_validator import normalize_chart_spec, validate_chart
 
+# Page layout and sidebar defaults
 st.set_page_config(
     page_title="Executive Insights",
     page_icon="📊",
@@ -14,6 +21,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Custom CSS for metric cards and dashboard panels
 DASHBOARD_CSS = """
 <style>
     .block-container { padding-top: 1.25rem; padding-bottom: 2rem; }
@@ -35,6 +43,7 @@ DASHBOARD_CSS = """
 
 
 def init_session_state() -> None:
+    """Ensure all session keys exist before the app reads them."""
     defaults = {
         "analysis_ready": False,
         "file_name": None,
@@ -49,6 +58,7 @@ def init_session_state() -> None:
 
 
 def reset_analysis() -> None:
+    """Clear cached analysis when the user removes their uploaded file."""
     st.session_state.analysis_ready = False
     st.session_state.file_name = None
     st.session_state.df = None
@@ -58,23 +68,27 @@ def reset_analysis() -> None:
 
 
 def load_dataframe(uploaded_file) -> pd.DataFrame:
+    """Parse an uploaded file into a pandas DataFrame (CSV or Excel)."""
     if uploaded_file.name.endswith(".csv"):
         return pd.read_csv(uploaded_file)
     return pd.read_excel(uploaded_file)
 
 
 def run_analysis(df: pd.DataFrame) -> None:
+    """Profile the dataset, call the AI agent, and recommend charts."""
     profile = profile_data(df)
 
     with st.status("Analyzing dataset…", expanded=True) as status:
         st.write("Profiling data")
         st.write("Generating executive insights")
+        # Pass a text preview of the first 20 rows so the LLM sees sample values
         insights = generate_insights(profile, df.head(20).to_string())
 
         st.write("Recommending charts")
         chart_recommendations = recommend_charts(df)
         status.update(label="Analysis complete", state="complete")
 
+    # Persist results in session state for the dashboard tabs
     st.session_state.profile = profile
     st.session_state.insights = insights
     st.session_state.chart_recommendations = chart_recommendations
@@ -82,10 +96,12 @@ def run_analysis(df: pd.DataFrame) -> None:
 
 
 def total_missing_cells(profile: dict) -> int:
+    """Sum missing-value counts across all columns from the data profile."""
     return int(sum(profile["missing_values"].values()))
 
 
 def render_header() -> None:
+    """Render the page title and subtitle."""
     col_title, _ = st.columns([3, 1])
     with col_title:
         st.title("Executive Insights")
@@ -93,6 +109,7 @@ def render_header() -> None:
 
 
 def render_kpi_row(profile: dict) -> None:
+    """Show top-level dataset metrics (rows, columns, missing data, numeric cols)."""
     missing = total_missing_cells(profile)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Rows", f"{profile['rows']:,}")
@@ -105,6 +122,7 @@ def render_kpi_row(profile: dict) -> None:
 
 
 def render_chart_card(df: pd.DataFrame, chart, *, chart_key: str) -> None:
+    """Validate, render, and display a single recommended chart."""
     chart = normalize_chart_spec(df, chart)
     is_valid, error = validate_chart(df, chart)
 
@@ -118,16 +136,19 @@ def render_chart_card(df: pd.DataFrame, chart, *, chart_key: str) -> None:
 
         fig = render_chart(df, chart)
         if fig:
+            # chart_key must be unique when multiple charts appear on one page
             st.plotly_chart(fig, use_container_width=True, key=chart_key)
         else:
             st.warning("Chart could not be rendered from this specification.")
 
 
 def tab_overview(df: pd.DataFrame, profile: dict, insights: str) -> None:
+    """Overview tab: KPIs, a short insight preview, and one featured chart."""
     render_kpi_row(profile)
 
     st.markdown("##### Executive snapshot")
     preview = insights.strip()
+    # Truncate long insight text at a word boundary for the overview
     if len(preview) > 600:
         preview = preview[:600].rsplit(" ", 1)[0] + "…"
     st.markdown(preview)
@@ -140,18 +161,21 @@ def tab_overview(df: pd.DataFrame, profile: dict, insights: str) -> None:
 
 
 def tab_insights(insights: str) -> None:
+    """Insights tab: full AI-generated executive analysis."""
     st.markdown('<div class="dashboard-panel">', unsafe_allow_html=True)
     st.markdown(insights)
     st.markdown("</div>", unsafe_allow_html=True)
 
 
 def tab_charts(df: pd.DataFrame) -> None:
+    """Charts tab: up to three recommended visualizations."""
     recommendations = st.session_state.chart_recommendations
     if not recommendations or not recommendations.charts:
         st.info("No chart recommendations were returned for this dataset.")
         return
 
     charts = recommendations.charts
+    # First two charts side by side when available
     if len(charts) >= 2:
         left, right = st.columns(2)
         with left:
@@ -159,6 +183,7 @@ def tab_charts(df: pd.DataFrame) -> None:
         with right:
             render_chart_card(df, charts[1], chart_key="charts-tab-1")
 
+    # Third chart spans full width; single chart also uses full width
     if len(charts) > 2:
         render_chart_card(df, charts[2], chart_key="charts-tab-2")
     elif len(charts) == 1:
@@ -166,6 +191,7 @@ def tab_charts(df: pd.DataFrame) -> None:
 
 
 def tab_data(df: pd.DataFrame, profile: dict) -> None:
+    """Data tab: raw preview and expandable column profile JSON."""
     st.markdown("##### Data preview")
     st.dataframe(df.head(100), use_container_width=True, hide_index=True)
 
@@ -174,6 +200,7 @@ def tab_data(df: pd.DataFrame, profile: dict) -> None:
 
 
 def render_dashboard() -> None:
+    """Build the four-tab dashboard once analysis results are in session state."""
     df = st.session_state.df
     profile = st.session_state.profile
     insights = st.session_state.insights
@@ -196,6 +223,7 @@ def render_dashboard() -> None:
 
 
 def main() -> None:
+    """App entry point: sidebar upload flow and main content area."""
     st.markdown(DASHBOARD_CSS, unsafe_allow_html=True)
     init_session_state()
     render_header()
@@ -209,12 +237,14 @@ def main() -> None:
         )
 
         if uploaded_file is None:
+            # User cleared the uploader — drop stale results
             if st.session_state.analysis_ready:
                 reset_analysis()
             st.info("Upload a file to start the dashboard.")
         else:
             st.caption(f"**File:** {uploaded_file.name}")
 
+            # New file detected: load, analyze, and rerun to show the dashboard
             if uploaded_file.name != st.session_state.file_name:
                 st.session_state.file_name = uploaded_file.name
                 st.session_state.df = load_dataframe(uploaded_file)

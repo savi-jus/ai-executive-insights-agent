@@ -1,3 +1,5 @@
+"""Ask the LLM to recommend executive charts from a dataset schema."""
+
 import json
 import os
 
@@ -11,6 +13,7 @@ load_dotenv()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# System prompt with BI rules so the model picks sensible axes and aggregations
 CHART_PROMPT = """You are a senior business intelligence analyst.
 
 Review the dataset schema below and recommend the 3 most useful executive-level charts.
@@ -52,8 +55,10 @@ Each chart object must include:
 
 
 def recommend_charts(df):
+    """Build a schema from df and return parsed ChartRecommendations from the LLM."""
     schema = build_chart_schema(df)
 
+    # Structured output parsing ensures the response matches ChartRecommendations
     response = client.responses.parse(
         model=os.getenv("CHARTING_MODEL"),
         input=CHART_PROMPT.format(schema=json.dumps(to_json_safe(schema), indent=2)),

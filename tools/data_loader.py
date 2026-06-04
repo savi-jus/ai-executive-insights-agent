@@ -1,5 +1,8 @@
-def profile_data(df):
+"""Dataset profiling helpers used before AI analysis."""
 
+
+def profile_data(df):
+    """Build a lightweight summary of shape, types, and missing values."""
     profile = {
         "rows": df.shape[0],
         "columns": df.shape[1],

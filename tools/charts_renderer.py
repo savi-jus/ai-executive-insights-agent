@@ -1,3 +1,5 @@
+"""Turn validated ChartSpec objects into Plotly figures."""
+
 import pandas as pd
 import plotly.express as px
 
@@ -14,21 +16,25 @@ MAX_PIE_CATEGORIES = 12
 MAX_BAR_CATEGORIES = 20
 COUNT_COLUMN = "count"
 
+# Older pandas freq aliases still accepted from LLM output
 LEGACY_FREQ_MAP = {"M": "ME", "Q": "QE", "Y": "YE"}
 
 
 def resolve_time_freq(freq: str | None) -> str:
+    """Default to monthly (ME) and normalize legacy freq codes."""
     raw = freq or "ME"
     return LEGACY_FREQ_MAP.get(raw, raw)
 
 
 def _parse_datetime(series: pd.Series) -> pd.Series:
+    """Coerce a column to datetime when it is not already typed as such."""
     if pd.api.types.is_datetime64_any_dtype(series):
         return series
     return pd.to_datetime(series, errors="coerce")
 
 
 def _limit_categories(df: pd.DataFrame, category_col: str, value_col: str, limit: int) -> pd.DataFrame:
+    """Keep top N categories by value sum and bucket the rest as 'Other'."""
     ranked = df.groupby(category_col, dropna=False)[value_col].sum().sort_values(ascending=False)
     top = ranked.head(limit).index.tolist()
     plot_df = df.copy()
@@ -37,6 +43,7 @@ def _limit_categories(df: pd.DataFrame, category_col: str, value_col: str, limit
 
 
 def _should_use_year_month_period(df: pd.DataFrame, chart: ChartSpec) -> bool:
+    """True when Year+Month columns should be merged into a single time axis."""
     year_col, month_col = find_year_month_columns(df)
     if not year_col or not month_col:
         return False
@@ -48,6 +55,7 @@ def _should_use_year_month_period(df: pd.DataFrame, chart: ChartSpec) -> bool:
 
 
 def _resolve_x_column(df: pd.DataFrame, chart: ChartSpec) -> tuple[pd.DataFrame, str]:
+    """Return working copy of df and the x column name to plot (may be synthetic _period)."""
     plot_df = df.copy()
     if _should_use_year_month_period(plot_df, chart):
         year_col, month_col = find_year_month_columns(plot_df)
@@ -56,12 +64,14 @@ def _resolve_x_column(df: pd.DataFrame, chart: ChartSpec) -> tuple[pd.DataFrame,
         return plot_df, PERIOD_COLUMN
 
     if chart.x in plot_df.columns and is_year_like_column(chart.x, plot_df[chart.x]):
+        # Plot years as categorical strings so axes don't show decimals
         plot_df[chart.x] = pd.to_numeric(plot_df[chart.x], errors="coerce").astype("Int64").astype(str)
 
     return plot_df, chart.x
 
 
 def _sort_plot_df(plot_df: pd.DataFrame, x_col: str) -> pd.DataFrame:
+    """Sort x chronologically for dates, numerically for year-like strings."""
     if x_col not in plot_df.columns:
         return plot_df
     if is_datetime_series(plot_df[x_col]) or pd.api.types.is_datetime64_any_dtype(plot_df[x_col]):
@@ -70,6 +80,7 @@ def _sort_plot_df(plot_df: pd.DataFrame, x_col: str) -> pd.DataFrame:
 
 
 def _apply_line_layout(fig, x_col: str, plot_df: pd.DataFrame) -> None:
+    """Format line chart x-axis for monthly periods vs year categories."""
     if x_col == PERIOD_COLUMN or is_datetime_series(plot_df[x_col]):
         fig.update_xaxes(tickformat="%b %Y", title="Month")
     elif x_col in plot_df.columns and is_year_like_column(x_col, plot_df[x_col]):
@@ -77,6 +88,7 @@ def _apply_line_layout(fig, x_col: str, plot_df: pd.DataFrame) -> None:
 
 
 def prepare_plot_data(df: pd.DataFrame, chart: ChartSpec) -> tuple[pd.DataFrame | None, str | None]:
+    """Aggregate and reshape df according to chart spec; returns (plot_df, y_column)."""
     if chart.x not in df.columns:
         return None, None
 
@@ -124,6 +136,7 @@ def prepare_plot_data(df: pd.DataFrame, chart: ChartSpec) -> tuple[pd.DataFrame 
             grouped = _limit_categories(grouped, x_col, chart.y, MAX_BAR_CATEGORIES)
         return _sort_plot_df(grouped, x_col), chart.y
 
+    # aggregation == "none": plot raw rows (with category limits for pie/bar)
     if chart.y and chart.y in plot_df.columns:
         if is_datetime_series(plot_df[x_col]):
             plot_df[x_col] = _parse_datetime(plot_df[x_col])
@@ -140,6 +153,7 @@ def prepare_plot_data(df: pd.DataFrame, chart: ChartSpec) -> tuple[pd.DataFrame 
 
 
 def render_chart(df, chart: ChartSpec):
+    """Build a Plotly figure from prepared data, or None if preparation failed."""
     plot_df, y_col = prepare_plot_data(df, chart)
     if plot_df is None or y_col is None:
         return None

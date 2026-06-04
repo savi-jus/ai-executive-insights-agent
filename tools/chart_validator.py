@@ -1,3 +1,5 @@
+"""Fix and validate LLM chart specs before rendering."""
+
 import pandas as pd
 
 from tools.chart_schema import (
@@ -28,6 +30,7 @@ def normalize_chart_spec(df: pd.DataFrame, chart: ChartSpec) -> ChartSpec:
     year_col, month_col = find_year_month_columns(df)
     metric_col = find_metric_column_for_title(df, chart.title)
 
+    # Metric trends (API hits, revenue, etc.) should sum a metric, not count rows
     if title_implies_metric_trend(chart.title):
         if chart.aggregation == "count" or (x_is_year and chart.aggregation == "none"):
             if metric_col:
@@ -39,6 +42,7 @@ def normalize_chart_spec(df: pd.DataFrame, chart: ChartSpec) -> ChartSpec:
             updates["aggregation"] = "sum"
             updates["y"] = metric_col
 
+    # Headcount/hiring charts count rows over time instead of summing an ID column
     if title_implies_headcount_trend(chart.title) and not title_implies_metric_trend(chart.title):
         if x_is_date and chart.aggregation == "none":
             updates["aggregation"] = "count"
@@ -78,6 +82,7 @@ def normalize_chart_spec(df: pd.DataFrame, chart: ChartSpec) -> ChartSpec:
 
 
 def validate_chart(df: pd.DataFrame, chart: ChartSpec) -> tuple[bool, str | None]:
+    """Return (True, None) if the chart can be rendered, else (False, error message)."""
     if chart.chart_type not in SUPPORTED_CHART_TYPES:
         return False, f"Unsupported chart type: {chart.chart_type}"
 
@@ -139,6 +144,7 @@ def validate_chart(df: pd.DataFrame, chart: ChartSpec) -> tuple[bool, str | None
             f"Use aggregation 'sum' with a metric column (e.g. API Hits), not row count by {chart.x}.",
         )
 
+    # Pie and bar charts need manageable category counts for readability
     if chart.chart_type == "pie" and chart.aggregation == "none":
         nunique = df[chart.x].nunique(dropna=True)
         if nunique > MAX_PIE_CATEGORIES:
