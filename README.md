@@ -13,7 +13,7 @@ After you upload a dataset, the app:
 - Profiles the data (shape, types, missing values)
 - Generates an executive analysis (insights, risks, trends, summary)
 - Recommends up to three charts with explanations
-- Validates chart specs against your columns and renders interactive Plotly charts
+- Normalizes and validates each chart spec, aggregates data when needed, and renders interactive Plotly charts
 
 ## Features
 
@@ -41,10 +41,50 @@ Powered by the OpenAI Chat Completions API (`agents/insight_agent.py`):
 
 Powered by the OpenAI Responses API with structured output (`tools/chart_recommender.py`):
 
-- LLM suggests three executive-level charts from the dataset schema
-- Each recommendation includes a title, chart type, axes, and rationale
-- Column names are validated before rendering (`tools/chart_validator.py`)
-- Supported chart types: line, bar, pie, scatter (rendered with Plotly in `tools/charts_renderer.py`)
+- LLM suggests three executive-level charts from enriched column metadata (types, cardinality, ID detection)
+- Each recommendation includes title, chart type, axes, optional aggregation, and rationale
+- **Normalize** — fixes common mistakes (e.g. using `Emp ID` as a metric for a headcount trend → monthly `count`)
+- **Validate** — blocks identifier columns as metrics, excessive pie/bar categories, and invalid axis combinations
+- **Render** — aggregates data (monthly/quarterly counts, sum, mean) before Plotly; caps crowded categories
+
+Supported chart types: `line`, `bar`, `pie`, `scatter`.
+
+## Chart pipeline
+
+```mermaid
+flowchart LR
+  upload[Upload CSV/Excel] --> profile[profile_data]
+  profile --> insights[generate_insights]
+  profile --> schema[build_chart_schema]
+  schema --> llm[recommend_charts]
+  llm --> normalize[normalize_chart_spec]
+  normalize --> validate[validate_chart]
+  validate -->|valid| render[prepare_plot_data + Plotly]
+  validate -->|invalid| warn[Streamlit warning]
+```
+
+| Step | Module | What it does |
+|------|--------|----------------|
+| Schema | `chart_schema.py` | Per-column metadata: `nunique`, numeric/datetime flags, `looks_like_id` |
+| Recommend | `chart_recommender.py` | LLM returns `ChartRecommendations` (structured JSON) |
+| Normalize | `chart_validator.py` | Auto-correct ID-on-axis and trend-without-aggregation specs |
+| Validate | `chart_validator.py` | Semantic rules; returns an error message if skipped |
+| Prepare | `charts_renderer.py` | Group-by-period counts, sum/mean, top-N categories |
+| Display | `app.py` | `st.plotly_chart` or `st.warning` |
+
+### ChartSpec fields
+
+| Field | Description |
+|-------|-------------|
+| `title` | Executive-facing chart title |
+| `chart_type` | `line`, `bar`, `pie`, or `scatter` |
+| `x` | Column for categories or time axis |
+| `y` | Numeric metric (optional when `aggregation` is `count`) |
+| `reason` | One-sentence rationale shown in the UI |
+| `aggregation` | `none`, `count`, `sum`, or `mean` |
+| `time_freq` | For datetime `x`: `D`, `W`, `ME`, `QE`, or `YE` (pandas period aliases) |
+
+**Example:** A “headcount trend by join date” chart should use `chart_type: line`, `x: Date of Join`, `aggregation: count`, `time_freq: ME` — not employee IDs on the y-axis.
 
 ## Architecture
 
@@ -59,13 +99,14 @@ ai-executive-insights-agent/
 │   └── insight_agent.py        # Executive insights via Chat Completions
 ├── tools/
 │   ├── data_loader.py          # Dataset profiling
-│   ├── charts_model.py         # Pydantic models for chart specs
+│   ├── charts_model.py         # Pydantic ChartSpec / ChartRecommendations
+│   ├── chart_schema.py         # Column metadata for the LLM
 │   ├── chart_recommender.py    # LLM chart recommendations
-│   ├── chart_validator.py      # Column validation before render
-│   └── charts_renderer.py      # Plotly chart rendering
-├── .env.example                # Environment variable template
-├── pyproject.toml              # Project metadata and dependencies (uv)
-├── requirements.txt            # Locked dependencies for pip / deployment
+│   ├── chart_validator.py      # normalize_chart_spec + validate_chart
+│   └── charts_renderer.py      # Aggregation + Plotly rendering
+├── .env.example
+├── pyproject.toml
+├── requirements.txt
 ├── uv.lock
 └── README.md
 ```
@@ -81,7 +122,7 @@ ai-executive-insights-agent/
 | AI | OpenAI API (Chat Completions + Responses with structured parsing) |
 | Models | Pydantic (`ChartSpec`, `ChartRecommendations`) |
 | UI | Streamlit |
-| Charts | Plotly |
+| Charts | Plotly Express |
 | Config | python-dotenv |
 | Packaging | [uv](https://docs.astral.sh/uv/) (`pyproject.toml`, `uv.lock`) |
 
@@ -120,7 +161,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-To regenerate `requirements.txt` after dependency changes:
+Regenerate `requirements.txt` after dependency changes:
 
 ```bash
 uv export --no-dev --no-hashes -o requirements.txt
@@ -138,8 +179,8 @@ cp .env.example .env
 |----------|----------|-------------|
 | `OPENAI_API_KEY` | Yes | Your OpenAI API key |
 | `INSIGHTS_MODEL` | Yes | Model for executive insights (e.g. `gpt-4o-mini`) |
-| `CHARTING_MODEL` | Yes | Model for chart recommendations (must support structured Responses parsing) |
-| `DATABASE_URL` | No | Reserved for future use; not used by the app today |
+| `CHARTING_MODEL` | Yes | Model for structured chart specs (e.g. `gpt-4o-mini` or `gpt-4o`) |
+| `DATABASE_URL` | No | Reserved for future use |
 | `DEBUG` | No | Reserved for future use |
 
 Example `.env`:
@@ -152,6 +193,8 @@ CHARTING_MODEL=gpt-4o-mini
 
 Never commit `.env` to version control (it is listed in `.gitignore`).
 
+Use a model that supports OpenAI **Responses** structured parsing for `CHARTING_MODEL`. Stronger models tend to produce better chart specs on complex schemas.
+
 ## Running the application
 
 With your virtual environment active:
@@ -162,20 +205,22 @@ streamlit run app.py
 
 Open [http://localhost:8501](http://localhost:8501) in your browser.
 
+Restart Streamlit after pulling code changes so chart validation and rendering updates load.
+
 ## Example workflow
 
 1. **Upload** a CSV or Excel file via the Streamlit file uploader.
 2. **Preview** the first rows of the dataset.
-3. **Profile** — the app computes row/column counts, dtypes, and missing values.
-4. **Insights** — the insight agent returns key findings, risks, trends, and an executive summary.
-5. **Charts** — the chart recommender proposes three charts; valid specs are rendered as interactive Plotly charts with titles and rationale.
+3. **Profile** — row/column counts, dtypes, and missing values.
+4. **Insights** — key findings, risks, trends, and an executive summary.
+5. **Charts** — three recommendations with titles and rationale; each spec is normalized, validated, aggregated, and plotted. Invalid charts show a warning instead of a misleading graphic.
 
 ## Deployment (Streamlit Community Cloud)
 
-1. Push the project to GitHub (include `app.py`, `requirements.txt`, and all source under `agents/` and `tools/`). Do not push `.env`.
+1. Push the project to GitHub (`app.py`, `requirements.txt`, `agents/`, `tools/`). Do not push `.env`.
 2. Sign in at [share.streamlit.io](https://share.streamlit.io) and create a **New app**.
-3. Select your repository, branch, and set **Main file path** to `app.py`.
-4. Under **Secrets**, add:
+3. Set **Main file path** to `app.py`.
+4. Under **Secrets**:
 
 ```toml
 OPENAI_API_KEY = "sk-your-key-here"
@@ -183,11 +228,11 @@ INSIGHTS_MODEL = "gpt-4o-mini"
 CHARTING_MODEL = "gpt-4o-mini"
 ```
 
-5. Deploy and verify the build completes. Upload a sample file to test insights and charts.
+5. Deploy and test with a sample upload.
 
-**Note:** The project targets Python 3.14. If the host does not support it yet, lower `requires-python` in `pyproject.toml` (e.g. `>=3.12`), refresh the lockfile with `uv lock`, re-export `requirements.txt`, and redeploy.
+**Python version:** The project targets Python 3.14. If the host does not support it, set `requires-python` in `pyproject.toml` to e.g. `>=3.12`, run `uv lock`, re-export `requirements.txt`, and redeploy.
 
-The app has no built-in authentication. Restrict access to your deployment URL if the data is sensitive.
+**Security:** There is no built-in authentication. Restrict access to your deployment URL when data is sensitive.
 
 ## Sample executive summary
 

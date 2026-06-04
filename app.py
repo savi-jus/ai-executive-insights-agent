@@ -5,7 +5,7 @@ from tools.data_loader import profile_data
 from agents.insight_agent import generate_insights
 from tools.charts_renderer import render_chart
 from tools.chart_recommender import recommend_charts
-from tools.chart_validator import validate_chart
+from tools.chart_validator import normalize_chart_spec, validate_chart
 
 st.title("Executive Insights AI Agent")
 
@@ -31,18 +31,19 @@ def main(df):
         st.subheader(chart.title)
         st.caption(chart.reason)
 
-        if validate_chart(df, chart):
+        chart = normalize_chart_spec(df, chart)
+        is_valid, error = validate_chart(df, chart)
 
-            fig = render_chart(
-                df,
-                chart
-            )
+        if not is_valid:
+            st.warning(error or "Chart could not be displayed.")
+            continue
 
-            if fig:
-                st.plotly_chart(
-                    fig,
-                    use_container_width=True
-                )
+        fig = render_chart(df, chart)
+
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("Chart could not be rendered from this specification.")
 
 
 if uploaded_file:
