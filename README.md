@@ -205,7 +205,9 @@ streamlit run app.py
 
 Open [http://localhost:8501](http://localhost:8501) in your browser.
 
-Restart Streamlit after pulling code changes so chart validation and rendering updates load.
+The UI uses a **light-themed dashboard** with sidebar upload and tabs: **Overview**, **Insights**, **Charts**, and **Data**. Theme settings live in `.streamlit/config.toml`.
+
+Restart Streamlit after pulling code changes so layout and chart updates load.
 
 ## Example workflow
 
