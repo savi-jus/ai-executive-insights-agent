@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-client = OpenAI(api_key=os.getenv("API_KOPENAI_API_KEYEY"))
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 def generate_insights(profile, sample_data):
