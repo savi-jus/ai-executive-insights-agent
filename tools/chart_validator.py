@@ -3,19 +3,25 @@
 import pandas as pd
 
 from tools.chart_schema import (
+    MAX_PIE_CATEGORIES,
     find_metric_column_for_title,
+    find_year_column,
     find_year_month_columns,
+    get_available_years,
     is_datetime_series,
     is_numeric_series,
+    is_time_filter_column,
+    is_time_series_chart,
     is_year_like_column,
     looks_like_id,
+    sync_chart_title_from_y,
     title_implies_headcount_trend,
     title_implies_metric_trend,
+    values_suggest_log_scale,
 )
 from tools.charts_model import ChartSpec
 
 SUPPORTED_CHART_TYPES = {"line", "bar", "pie", "scatter"}
-MAX_PIE_CATEGORIES = 12
 MAX_BAR_CATEGORIES = 20
 MAX_CATEGORICAL_Y_FOR_LINE = 30
 
@@ -76,8 +82,63 @@ def normalize_chart_spec(df: pd.DataFrame, chart: ChartSpec) -> ChartSpec:
         updates["aggregation"] = "sum"
         updates["y"] = metric_col
 
+    if chart.chart_type == "pie" and chart.x in df.columns:
+        if df[chart.x].nunique(dropna=True) > MAX_PIE_CATEGORIES:
+            updates["chart_type"] = "bar"
+
+    if (
+        chart.chart_type in ("line", "bar", "scatter")
+        and chart.y
+        and chart.y in df.columns
+        and not chart.log_y
+        and values_suggest_log_scale(df[chart.y])
+    ):
+        updates["log_y"] = True
+
+    if chart.chart_type == "bar" and chart.group_by and not chart.bar_mode:
+        updates["bar_mode"] = "group"
+
+    if chart.group_by and chart.group_by not in df.columns:
+        updates["group_by"] = None
+        updates["bar_mode"] = None
+    elif chart.group_by:
+        if chart.group_by == chart.x or chart.group_by == chart.y:
+            updates["group_by"] = None
+            updates["bar_mode"] = None
+        elif looks_like_id(chart.group_by):
+            updates["group_by"] = None
+            updates["bar_mode"] = None
+
+    year_col = find_year_column(df)
+    if (
+        year_col
+        and not chart.time_column
+        and not is_time_series_chart(df, chart)
+        and chart.chart_type in ("bar", "line")
+        and chart.x != year_col
+        and len(get_available_years(df, year_col)) >= 2
+    ):
+        updates["time_column"] = year_col
+
+    if chart.time_column and is_time_series_chart(df, chart):
+        updates["time_column"] = None
+
+    if chart.time_column:
+        if chart.time_column not in df.columns:
+            updates["time_column"] = find_year_column(df)
+        elif not is_time_filter_column(chart.time_column, df[chart.time_column]):
+            updates["time_column"] = find_year_column(df)
+
     if updates:
-        return chart.model_copy(update=updates)
+        chart = chart.model_copy(update=updates)
+
+    if chart.bar_mode and (not chart.group_by or chart.chart_type != "bar"):
+        chart = chart.model_copy(update={"bar_mode": None})
+
+    synced_title = sync_chart_title_from_y(chart, df)
+    if synced_title != chart.title:
+        chart = chart.model_copy(update={"title": synced_title})
+
     return chart
 
 
@@ -88,6 +149,30 @@ def validate_chart(df: pd.DataFrame, chart: ChartSpec) -> tuple[bool, str | None
 
     if chart.x not in df.columns:
         return False, f"Column '{chart.x}' is not in the dataset."
+
+    if chart.group_by:
+        if chart.group_by not in df.columns:
+            return False, f"Column '{chart.group_by}' is not in the dataset."
+        if chart.group_by == chart.x:
+            return False, "group_by must differ from x."
+        if chart.y and chart.group_by == chart.y:
+            return False, "group_by must differ from y."
+        if looks_like_id(chart.group_by):
+            return False, f"Column '{chart.group_by}' looks like an identifier, not a group."
+        if chart.chart_type == "pie":
+            return False, "Pie charts do not support group_by."
+
+    if chart.bar_mode and chart.chart_type != "bar":
+        return False, "bar_mode applies only to bar charts."
+
+    if chart.time_column:
+        if chart.time_column not in df.columns:
+            return False, f"Column '{chart.time_column}' is not in the dataset."
+        if not is_time_filter_column(chart.time_column, df[chart.time_column]):
+            return False, (
+                f"Column '{chart.time_column}' cannot be used for year filtering "
+                "(use a Year column or a date/datetime column)."
+            )
 
     if chart.aggregation in ("sum", "mean"):
         if not chart.y:
@@ -144,14 +229,14 @@ def validate_chart(df: pd.DataFrame, chart: ChartSpec) -> tuple[bool, str | None
             f"Use aggregation 'sum' with a metric column (e.g. API Hits), not row count by {chart.x}.",
         )
 
-    # Pie and bar charts need manageable category counts for readability
-    if chart.chart_type == "pie" and chart.aggregation == "none":
+    # Pie charts need at most MAX_PIE_CATEGORIES groups (prefer bar beyond that)
+    if chart.chart_type == "pie" and chart.x in df.columns:
         nunique = df[chart.x].nunique(dropna=True)
         if nunique > MAX_PIE_CATEGORIES:
             return (
                 False,
                 f"Column '{chart.x}' has {nunique} categories; pie charts need at most "
-                f"{MAX_PIE_CATEGORIES} (use aggregation or a grouped column).",
+                f"{MAX_PIE_CATEGORIES} — use a bar chart instead.",
             )
 
     if chart.chart_type == "bar" and chart.aggregation in ("none", "count"):

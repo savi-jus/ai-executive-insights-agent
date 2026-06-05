@@ -11,7 +11,82 @@ from tools.data_loader import profile_data
 from agents.insight_agent import generate_insights
 from tools.charts_renderer import render_chart
 from tools.chart_recommender import recommend_charts
+from tools.chart_schema import (
+    TREND_CHART_TYPES,
+    chart_display_reason,
+    chart_display_title,
+    supports_legend_filter,
+    supports_time_slider,
+    supports_trend_chart_controls,
+    trend_group_options,
+)
 from tools.chart_validator import normalize_chart_spec, validate_chart
+
+
+def _apply_trend_chart_controls(df: pd.DataFrame, chart, *, chart_key: str):
+    """Render dropdowns/radio for time-series trend charts; return an updated ChartSpec."""
+    control_key = f"{chart_key}-{st.session_state.file_name}"
+    updates: dict = {}
+
+    col_type, col_group, col_agg = st.columns(3)
+
+    with col_type:
+        type_index = (
+            TREND_CHART_TYPES.index(chart.chart_type)
+            if chart.chart_type in TREND_CHART_TYPES
+            else 0
+        )
+        chart_type = st.selectbox(
+            "Chart type",
+            TREND_CHART_TYPES,
+            index=type_index,
+            key=f"trend-type-{control_key}",
+        )
+        if chart_type != chart.chart_type:
+            updates["chart_type"] = chart_type
+
+    group_options = trend_group_options(df, chart, y_column=chart.y)
+    with col_group:
+        default_group = (
+            chart.group_by if chart.group_by in group_options else "All groups"
+        )
+        group_choice = st.selectbox(
+            #Compare groups",
+            "Compare by",
+            group_options,
+            index=group_options.index(default_group),
+            key=f"trend-group-{control_key}",
+        )
+        if group_choice == "All groups":
+            updates["group_by"] = None
+            updates["bar_mode"] = None
+        else:
+            updates["group_by"] = group_choice
+            effective_type = updates.get("chart_type", chart.chart_type)
+            if effective_type == "bar":
+                updates["bar_mode"] = chart.bar_mode or "group"
+
+    with col_agg:
+        if chart.aggregation == "count" and not chart.y:
+            st.caption("Aggregation: **Total (row count)**")
+        elif chart.y:
+            current_agg = updates.get("aggregation", chart.aggregation)
+            if current_agg not in ("sum", "mean"):
+                current_agg = "sum"
+            agg_choice = st.radio(
+                "Aggregation",
+                options=["sum", "mean"],
+                format_func=lambda value: "Total" if value == "sum" else "Average",
+                horizontal=True,
+                index=0 if current_agg == "sum" else 1,
+                key=f"trend-agg-{control_key}",
+            )
+            updates["aggregation"] = agg_choice
+        else:
+            st.caption("—")
+
+    display_chart = chart.model_copy(update=updates) if updates else chart
+    return normalize_chart_spec(df, display_chart)
 
 # Page layout and sidebar defaults
 st.set_page_config(
@@ -124,17 +199,46 @@ def render_kpi_row(profile: dict) -> None:
 def render_chart_card(df: pd.DataFrame, chart, *, chart_key: str) -> None:
     """Validate, render, and display a single recommended chart."""
     chart = normalize_chart_spec(df, chart)
-    is_valid, error = validate_chart(df, chart)
 
     with st.container(border=True):
-        st.subheader(chart.title, divider=False)
-        st.caption(chart.reason)
+        if supports_trend_chart_controls(df, chart):
+            display_chart = _apply_trend_chart_controls(df, chart, chart_key=chart_key)
+        else:
+            display_chart = chart
 
+        st.subheader(chart_display_title(display_chart), divider=False)
+        st.caption(chart_display_reason(display_chart))
+
+        is_valid, error = validate_chart(df, display_chart)
         if not is_valid:
             st.warning(error or "Chart could not be displayed.")
             return
 
-        fig = render_chart(df, chart)
+        filter_period = None
+        filter_granularity = None
+        time_slider = supports_time_slider(df, display_chart)
+        if time_slider:
+            selected_label = st.select_slider(
+                time_slider.slider_label,
+                options=time_slider.labels,
+                value=time_slider.labels[-1],
+                key=f"time-slider-{chart_key}-{st.session_state.file_name}",
+            )
+            selected_index = time_slider.labels.index(selected_label)
+            filter_period = time_slider.periods[selected_index]
+            filter_granularity = time_slider.granularity
+
+        if supports_legend_filter(df, display_chart):
+            st.caption(
+                "Tip: click a legend item to show or hide a series."
+            )
+
+        fig = render_chart(
+            df,
+            display_chart,
+            filter_period=filter_period,
+            filter_granularity=filter_granularity,
+        )
         if fig:
             # chart_key must be unique when multiple charts appear on one page
             st.plotly_chart(fig, use_container_width=True, key=chart_key)
@@ -168,26 +272,29 @@ def tab_insights(insights: str) -> None:
 
 
 def tab_charts(df: pd.DataFrame) -> None:
-    """Charts tab: up to three recommended visualizations."""
+    """Charts tab: recommended visualizations excluding the Overview featured chart."""
     recommendations = st.session_state.chart_recommendations
     if not recommendations or not recommendations.charts:
         st.info("No chart recommendations were returned for this dataset.")
         return
 
-    charts = recommendations.charts
-    # First two charts side by side when available
+    # First chart is featured on the Overview tab — show the rest here
+    charts = recommendations.charts[1:]
+    if not charts:
+        st.info("Only one chart was recommended; see the **Overview** tab for the featured chart.")
+        return
+
     if len(charts) >= 2:
         left, right = st.columns(2)
         with left:
-            render_chart_card(df, charts[0], chart_key="charts-tab-0")
+            render_chart_card(df, charts[0], chart_key="charts-tab-1")
         with right:
-            render_chart_card(df, charts[1], chart_key="charts-tab-1")
+            render_chart_card(df, charts[1], chart_key="charts-tab-2")
 
-    # Third chart spans full width; single chart also uses full width
     if len(charts) > 2:
-        render_chart_card(df, charts[2], chart_key="charts-tab-2")
+        render_chart_card(df, charts[2], chart_key="charts-tab-3")
     elif len(charts) == 1:
-        render_chart_card(df, charts[0], chart_key="charts-tab-0")
+        render_chart_card(df, charts[0], chart_key="charts-tab-1")
 
 
 def tab_data(df: pd.DataFrame, profile: dict) -> None:

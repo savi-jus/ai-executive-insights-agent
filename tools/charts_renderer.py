@@ -4,15 +4,19 @@ import pandas as pd
 import plotly.express as px
 
 from tools.chart_schema import (
+    MAX_PIE_CATEGORIES,
     PERIOD_COLUMN,
     build_period_series,
+    chart_display_title,
+    filter_df_to_time_period,
     find_year_month_columns,
+    resolve_timeline_series,
     is_datetime_series,
     is_year_like_column,
+    values_suggest_log_scale,
 )
 from tools.charts_model import ChartSpec
 
-MAX_PIE_CATEGORIES = 12
 MAX_BAR_CATEGORIES = 20
 COUNT_COLUMN = "count"
 
@@ -33,13 +37,39 @@ def _parse_datetime(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series, errors="coerce")
 
 
+def _filter_df_by_time_period(
+    df: pd.DataFrame,
+    chart: ChartSpec,
+    filter_period: pd.Timestamp | None,
+    filter_granularity: str | None,
+) -> pd.DataFrame:
+    """Keep rows for the selected time bucket when the period slider is active."""
+    if filter_period is None or not filter_granularity:
+        return df
+
+    timeline = resolve_timeline_series(df, chart)
+    if timeline is None:
+        return df
+
+    return filter_df_to_time_period(df, timeline, filter_period, filter_granularity)
+
+
 def _limit_categories(df: pd.DataFrame, category_col: str, value_col: str, limit: int) -> pd.DataFrame:
     """Keep top N categories by value sum and bucket the rest as 'Other'."""
     ranked = df.groupby(category_col, dropna=False)[value_col].sum().sort_values(ascending=False)
     top = ranked.head(limit).index.tolist()
     plot_df = df.copy()
+    # Keep one dtype so sorting/plotting does not mix ints and strings (e.g. 2021 vs "Other")
+    plot_df[category_col] = plot_df[category_col].astype(str)
+    top = [str(value) for value in top]
     plot_df[category_col] = plot_df[category_col].where(plot_df[category_col].isin(top), "Other")
     return plot_df.groupby(category_col, dropna=False)[value_col].sum().reset_index()
+
+
+def _group_keys(x_col: str, chart: ChartSpec) -> list[str]:
+    if chart.group_by and chart.group_by != x_col:
+        return [x_col, chart.group_by]
+    return [x_col]
 
 
 def _should_use_year_month_period(df: pd.DataFrame, chart: ChartSpec) -> bool:
@@ -71,12 +101,31 @@ def _resolve_x_column(df: pd.DataFrame, chart: ChartSpec) -> tuple[pd.DataFrame,
 
 
 def _sort_plot_df(plot_df: pd.DataFrame, x_col: str) -> pd.DataFrame:
-    """Sort x chronologically for dates, numerically for year-like strings."""
+    """Sort x chronologically for dates, numerically for year-like values, else as text."""
     if x_col not in plot_df.columns:
         return plot_df
-    if is_datetime_series(plot_df[x_col]) or pd.api.types.is_datetime64_any_dtype(plot_df[x_col]):
+
+    series = plot_df[x_col]
+    if x_col == PERIOD_COLUMN or pd.api.types.is_datetime64_any_dtype(series):
         return plot_df.sort_values(x_col)
-    return plot_df.sort_values(x_col, key=lambda s: pd.to_numeric(s, errors="coerce"))
+
+    if pd.api.types.is_numeric_dtype(series):
+        return plot_df.sort_values(x_col)
+
+    parsed_num = pd.to_numeric(series, errors="coerce")
+    if parsed_num.notna().mean() >= 0.8:
+        return (
+            plot_df.assign(_sort_key=parsed_num)
+            .sort_values("_sort_key")
+            .drop(columns="_sort_key")
+        )
+
+    if is_datetime_series(series):
+        parsed_dt = pd.to_datetime(series, errors="coerce")
+        if parsed_dt.notna().mean() >= 0.8:
+            return plot_df.assign(**{x_col: parsed_dt}).sort_values(x_col)
+
+    return plot_df.sort_values(x_col, key=lambda s: s.astype(str))
 
 
 def _apply_line_layout(fig, x_col: str, plot_df: pd.DataFrame) -> None:
@@ -87,6 +136,68 @@ def _apply_line_layout(fig, x_col: str, plot_df: pd.DataFrame) -> None:
         fig.update_xaxes(type="category", title=x_col)
 
 
+def _is_datetime_x_axis(x_col: str, plot_df: pd.DataFrame) -> bool:
+    if x_col not in plot_df.columns:
+        return False
+    if x_col == PERIOD_COLUMN:
+        return True
+    return is_datetime_series(plot_df[x_col]) or pd.api.types.is_datetime64_any_dtype(plot_df[x_col])
+
+
+def _apply_time_series_range_slider(fig, x_col: str, plot_df: pd.DataFrame, chart: ChartSpec) -> None:
+    """Add an x-axis range slider when the trend has many datetime points."""
+    if chart.chart_type not in ("line", "bar") or not _is_datetime_x_axis(x_col, plot_df):
+        return
+
+    x_values = pd.to_datetime(plot_df[x_col], errors="coerce").dropna().sort_values()
+    if len(x_values) < 8:
+        return
+
+    min_x, max_x = x_values.min(), x_values.max()
+    span = max_x - min_x
+    if span <= pd.Timedelta(0):
+        return
+
+    # Default view: most recent ~40% of the timeline for readability
+    view_start = max(min_x, max_x - span * 0.4)
+    fig.update_xaxes(
+        range=[view_start, max_x],
+        rangeslider=dict(visible=True),
+        tickformat="%b %Y",
+    )
+
+
+def _apply_legend_layout(fig, chart: ChartSpec) -> None:
+    """Enable click-to-toggle series in the legend."""
+    if not chart.group_by:
+        return
+    fig.update_layout(
+        legend=dict(
+            title_text=chart.group_by,
+            itemclick="toggle",
+            itemdoubleclick="toggleothers",
+        )
+    )
+
+
+def _apply_log_y_axis(fig, plot_df: pd.DataFrame, y_col: str, chart: ChartSpec) -> None:
+    """Use a log y-axis when requested or when aggregated values span a wide range."""
+    if chart.chart_type not in ("line", "bar", "scatter"):
+        return
+    if y_col not in plot_df.columns:
+        return
+
+    use_log = chart.log_y or values_suggest_log_scale(plot_df[y_col])
+    if not use_log:
+        return
+
+    values = plot_df[y_col].dropna()
+    if values.empty or (values <= 0).any():
+        return
+
+    fig.update_yaxes(type="log")
+
+
 def prepare_plot_data(df: pd.DataFrame, chart: ChartSpec) -> tuple[pd.DataFrame | None, str | None]:
     """Aggregate and reshape df according to chart spec; returns (plot_df, y_column)."""
     if chart.x not in df.columns:
@@ -95,21 +206,35 @@ def prepare_plot_data(df: pd.DataFrame, chart: ChartSpec) -> tuple[pd.DataFrame 
     plot_df, x_col = _resolve_x_column(df, chart)
     agg = chart.aggregation
     freq = resolve_time_freq(chart.time_freq)
+    group_keys = _group_keys(x_col, chart)
 
     if agg == "count":
         x_series = plot_df[x_col]
         if is_datetime_series(x_series) or x_col == PERIOD_COLUMN:
             if x_col != PERIOD_COLUMN:
                 plot_df[x_col] = _parse_datetime(plot_df[x_col])
-            grouped = (
-                plot_df.groupby(pd.Grouper(key=x_col, freq=freq))
-                .size()
-                .reset_index(name=COUNT_COLUMN)
-            )
+            if chart.group_by and chart.group_by in plot_df.columns:
+                grouped = (
+                    plot_df.groupby([pd.Grouper(key=x_col, freq=freq), chart.group_by])
+                    .size()
+                    .reset_index(name=COUNT_COLUMN)
+                )
+            else:
+                grouped = (
+                    plot_df.groupby(pd.Grouper(key=x_col, freq=freq))
+                    .size()
+                    .reset_index(name=COUNT_COLUMN)
+                )
             return _sort_plot_df(grouped.dropna(subset=[x_col]), x_col), COUNT_COLUMN
 
-        grouped = plot_df.groupby(x_col, dropna=False).size().reset_index(name=COUNT_COLUMN)
-        if chart.chart_type == "bar" and len(grouped) > MAX_BAR_CATEGORIES:
+        if chart.group_by and chart.group_by in plot_df.columns:
+            grouped = (
+                plot_df.groupby(group_keys, dropna=False).size().reset_index(name=COUNT_COLUMN)
+            )
+        else:
+            grouped = plot_df.groupby(x_col, dropna=False).size().reset_index(name=COUNT_COLUMN)
+
+        if chart.chart_type == "bar" and not chart.group_by and len(grouped) > MAX_BAR_CATEGORIES:
             grouped = _limit_categories(grouped, x_col, COUNT_COLUMN, MAX_BAR_CATEGORIES)
         if chart.chart_type == "pie" and len(grouped) > MAX_PIE_CATEGORIES:
             grouped = _limit_categories(grouped, x_col, COUNT_COLUMN, MAX_PIE_CATEGORIES)
@@ -120,19 +245,27 @@ def prepare_plot_data(df: pd.DataFrame, chart: ChartSpec) -> tuple[pd.DataFrame 
         if is_datetime_series(x_series) or x_col == PERIOD_COLUMN:
             if x_col != PERIOD_COLUMN:
                 plot_df[x_col] = _parse_datetime(plot_df[x_col])
-            grouped = plot_df.groupby(pd.Grouper(key=x_col, freq=freq))[chart.y]
+            if chart.group_by and chart.group_by in plot_df.columns:
+                grouped = plot_df.groupby([pd.Grouper(key=x_col, freq=freq), chart.group_by])[chart.y]
+            else:
+                grouped = plot_df.groupby(pd.Grouper(key=x_col, freq=freq))[chart.y]
             if agg == "sum":
                 result = grouped.sum().reset_index()
             else:
                 result = grouped.mean().reset_index()
             return _sort_plot_df(result.dropna(subset=[x_col]), x_col), chart.y
 
-        if agg == "sum":
-            grouped = plot_df.groupby(x_col, dropna=False)[chart.y].sum().reset_index()
+        if chart.group_by and chart.group_by in plot_df.columns:
+            grouped = plot_df.groupby(group_keys, dropna=False)[chart.y]
         else:
-            grouped = plot_df.groupby(x_col, dropna=False)[chart.y].mean().reset_index()
+            grouped = plot_df.groupby(x_col, dropna=False)[chart.y]
 
-        if chart.chart_type == "bar" and len(grouped) > MAX_BAR_CATEGORIES:
+        if agg == "sum":
+            grouped = grouped.sum().reset_index()
+        else:
+            grouped = grouped.mean().reset_index()
+
+        if chart.chart_type == "bar" and not chart.group_by and len(grouped) > MAX_BAR_CATEGORIES:
             grouped = _limit_categories(grouped, x_col, chart.y, MAX_BAR_CATEGORIES)
         return _sort_plot_df(grouped, x_col), chart.y
 
@@ -144,7 +277,7 @@ def prepare_plot_data(df: pd.DataFrame, chart: ChartSpec) -> tuple[pd.DataFrame 
         if chart.chart_type == "pie" and plot_df[x_col].nunique() > MAX_PIE_CATEGORIES:
             limited = plot_df.groupby(x_col, dropna=False)[chart.y].sum().reset_index()
             return _limit_categories(limited, x_col, chart.y, MAX_PIE_CATEGORIES), chart.y
-        if chart.chart_type == "bar" and plot_df[x_col].nunique() > MAX_BAR_CATEGORIES:
+        if chart.chart_type == "bar" and not chart.group_by and plot_df[x_col].nunique() > MAX_BAR_CATEGORIES:
             limited = plot_df.groupby(x_col, dropna=False)[chart.y].sum().reset_index()
             return _limit_categories(limited, x_col, chart.y, MAX_BAR_CATEGORIES), chart.y
         return plot_df, chart.y
@@ -152,26 +285,66 @@ def prepare_plot_data(df: pd.DataFrame, chart: ChartSpec) -> tuple[pd.DataFrame 
     return None, None
 
 
-def render_chart(df, chart: ChartSpec):
+def render_chart(
+    df,
+    chart: ChartSpec,
+    *,
+    filter_period: pd.Timestamp | None = None,
+    filter_granularity: str | None = None,
+):
     """Build a Plotly figure from prepared data, or None if preparation failed."""
-    plot_df, y_col = prepare_plot_data(df, chart)
+    plot_df = _filter_df_by_time_period(df, chart, filter_period, filter_granularity)
+    if plot_df.empty:
+        return None
+
+    plot_df, y_col = prepare_plot_data(plot_df, chart)
     if plot_df is None or y_col is None:
         return None
 
     x_col = PERIOD_COLUMN if PERIOD_COLUMN in plot_df.columns else chart.x
+    color_col = chart.group_by if chart.group_by and chart.group_by in plot_df.columns else None
+    plot_title = chart_display_title(chart)
 
     if chart.chart_type == "line":
-        fig = px.line(plot_df, x=x_col, y=y_col, title=chart.title, markers=True)
+        fig = px.line(
+            plot_df,
+            x=x_col,
+            y=y_col,
+            color=color_col,
+            title=plot_title,
+            markers=True,
+        )
         _apply_line_layout(fig, x_col, plot_df)
+        _apply_time_series_range_slider(fig, x_col, plot_df, chart)
+        _apply_legend_layout(fig, chart)
+        _apply_log_y_axis(fig, plot_df, y_col, chart)
 
     elif chart.chart_type == "bar":
-        fig = px.bar(plot_df, x=x_col, y=y_col, title=chart.title)
+        fig = px.bar(
+            plot_df,
+            x=x_col,
+            y=y_col,
+            color=color_col,
+            barmode=chart.bar_mode if color_col else "relative",
+            title=plot_title,
+        )
+        _apply_time_series_range_slider(fig, x_col, plot_df, chart)
+        _apply_legend_layout(fig, chart)
+        _apply_log_y_axis(fig, plot_df, y_col, chart)
 
     elif chart.chart_type == "scatter":
-        fig = px.scatter(plot_df, x=x_col, y=y_col, title=chart.title)
+        fig = px.scatter(
+            plot_df,
+            x=x_col,
+            y=y_col,
+            color=color_col,
+            title=plot_title,
+        )
+        _apply_legend_layout(fig, chart)
+        _apply_log_y_axis(fig, plot_df, y_col, chart)
 
     elif chart.chart_type == "pie":
-        fig = px.pie(plot_df, names=x_col, values=y_col, title=chart.title)
+        fig = px.pie(plot_df, names=x_col, values=y_col, title=plot_title)
 
     else:
         return None
