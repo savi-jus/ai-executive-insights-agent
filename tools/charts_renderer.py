@@ -8,17 +8,22 @@ from tools.chart_schema import (
     PERIOD_COLUMN,
     build_period_series,
     chart_display_title,
+    correlation_metric_columns,
     filter_df_to_time_period,
     find_year_month_columns,
-    resolve_timeline_series,
     is_datetime_series,
+    is_month_like_column,
+    is_numeric_series,
     is_year_like_column,
+    looks_like_rating_column,
+    resolve_timeline_series,
     values_suggest_log_scale,
 )
 from tools.charts_model import ChartSpec
 
 MAX_BAR_CATEGORIES = 20
 COUNT_COLUMN = "count"
+DISTRIBUTION_BIN_COUNT = 12
 
 # Older pandas freq aliases still accepted from LLM output
 LEGACY_FREQ_MAP = {"M": "ME", "Q": "QE", "Y": "YE"}
@@ -64,6 +69,46 @@ def _limit_categories(df: pd.DataFrame, category_col: str, value_col: str, limit
     top = [str(value) for value in top]
     plot_df[category_col] = plot_df[category_col].where(plot_df[category_col].isin(top), "Other")
     return plot_df.groupby(category_col, dropna=False)[value_col].sum().reset_index()
+
+
+def _needs_numeric_binning(x_col: str, series: pd.Series) -> bool:
+    """True when x is a continuous numeric field with too many distinct values to plot raw."""
+    if not is_numeric_series(series):
+        return False
+    if is_year_like_column(x_col, series) or is_month_like_column(x_col):
+        return False
+    if is_datetime_series(series):
+        return False
+    if looks_like_rating_column(x_col, series):
+        return False
+    return series.nunique(dropna=True) > MAX_PIE_CATEGORIES
+
+
+def _apply_numeric_bins(plot_df: pd.DataFrame, x_col: str) -> pd.DataFrame:
+    """Bucket continuous numeric x values into readable histogram bins."""
+    numeric = pd.to_numeric(plot_df[x_col], errors="coerce")
+    valid = numeric.dropna()
+    if valid.empty:
+        return plot_df
+
+    span = valid.max() - valid.min()
+    if span <= 0:
+        return plot_df
+
+    bin_count = min(DISTRIBUTION_BIN_COUNT, max(5, int(valid.nunique() ** 0.5)))
+    binned = pd.cut(numeric, bins=bin_count, duplicates="drop")
+    result = plot_df.copy()
+    result[x_col] = binned.astype(str)
+    return result.dropna(subset=[x_col])
+
+
+def _apply_bar_category_layout(fig, x_col: str, plot_df: pd.DataFrame) -> None:
+    """Use categorical x labels when bins or long category names would overlap."""
+    if x_col not in plot_df.columns:
+        return
+    labels = plot_df[x_col].astype(str)
+    if labels.str.contains(r"[\(\[]", regex=True).any() or labels.str.len().max() > 8:
+        fig.update_xaxes(type="category", tickangle=-35)
 
 
 def _group_keys(x_col: str, chart: ChartSpec) -> list[str]:
@@ -126,6 +171,14 @@ def _sort_plot_df(plot_df: pd.DataFrame, x_col: str) -> pd.DataFrame:
             return plot_df.assign(**{x_col: parsed_dt}).sort_values(x_col)
 
     return plot_df.sort_values(x_col, key=lambda s: s.astype(str))
+
+
+def _apply_scatter_layout(fig, x_col: str, y_col: str, plot_df: pd.DataFrame) -> None:
+    """Keep numeric axes linear for continuous scatter plots."""
+    if x_col in plot_df.columns and is_numeric_series(plot_df[x_col]):
+        fig.update_xaxes(type="linear")
+    if y_col in plot_df.columns and is_numeric_series(plot_df[y_col]):
+        fig.update_yaxes(type="linear")
 
 
 def _apply_line_layout(fig, x_col: str, plot_df: pd.DataFrame) -> None:
@@ -207,6 +260,16 @@ def prepare_plot_data(df: pd.DataFrame, chart: ChartSpec) -> tuple[pd.DataFrame 
     agg = chart.aggregation
     freq = resolve_time_freq(chart.time_freq)
     group_keys = _group_keys(x_col, chart)
+
+    if (
+        not chart.group_by
+        and chart.chart_type in ("bar", "pie")
+        and agg in ("count", "none")
+        and _needs_numeric_binning(x_col, plot_df[x_col])
+    ):
+        plot_df = _apply_numeric_bins(plot_df, x_col)
+        if agg == "none":
+            agg = "count"
 
     if agg == "count":
         x_series = plot_df[x_col]
@@ -297,13 +360,33 @@ def render_chart(
     if plot_df.empty:
         return None
 
+    plot_title = "" #chart_display_title(chart)
+
+    if chart.chart_type == "heatmap":
+        metric_cols = correlation_metric_columns(plot_df)
+        if len(metric_cols) < 2:
+            return None
+        corr = plot_df[metric_cols].corr(numeric_only=True)
+        fig = px.imshow(
+            corr,
+            x=corr.columns,
+            y=corr.columns,
+            text_auto=".2f",
+            aspect="auto",
+            color_continuous_scale="RdBu",
+            zmin=-1,
+            zmax=1,
+            title=plot_title,
+        )
+        fig.update_layout(xaxis_side="top")
+        return fig
+
     plot_df, y_col = prepare_plot_data(plot_df, chart)
     if plot_df is None or y_col is None:
         return None
 
     x_col = PERIOD_COLUMN if PERIOD_COLUMN in plot_df.columns else chart.x
     color_col = chart.group_by if chart.group_by and chart.group_by in plot_df.columns else None
-    plot_title = chart_display_title(chart)
 
     if chart.chart_type == "line":
         fig = px.line(
@@ -329,6 +412,7 @@ def render_chart(
             title=plot_title,
         )
         _apply_time_series_range_slider(fig, x_col, plot_df, chart)
+        _apply_bar_category_layout(fig, x_col, plot_df)
         _apply_legend_layout(fig, chart)
         _apply_log_y_axis(fig, plot_df, y_col, chart)
 
@@ -340,6 +424,7 @@ def render_chart(
             color=color_col,
             title=plot_title,
         )
+        _apply_scatter_layout(fig, x_col, y_col, plot_df)
         _apply_legend_layout(fig, chart)
         _apply_log_y_axis(fig, plot_df, y_col, chart)
 

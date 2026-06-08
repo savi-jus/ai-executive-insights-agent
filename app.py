@@ -19,8 +19,9 @@ from tools.chart_schema import (
     supports_time_slider,
     supports_trend_chart_controls,
     trend_group_options,
+    trend_metric_options,
 )
-from tools.chart_validator import normalize_chart_spec, validate_chart
+from tools.chart_validator import build_chart_fallback, normalize_chart_spec, validate_chart
 
 
 def _apply_trend_chart_controls(df: pd.DataFrame, chart, *, chart_key: str):
@@ -28,7 +29,28 @@ def _apply_trend_chart_controls(df: pd.DataFrame, chart, *, chart_key: str):
     control_key = f"{chart_key}-{st.session_state.file_name}"
     updates: dict = {}
 
-    col_type, col_group, col_agg = st.columns(3)
+    metric_options = trend_metric_options(df, chart)
+    show_metric_picker = bool(chart.y) and len(metric_options) > 1
+
+    if show_metric_picker:
+        col_metric, col_type, col_group, col_agg = st.columns(4)
+    else:
+        col_metric = None
+        col_type, col_group, col_agg = st.columns(3)
+
+    if show_metric_picker and col_metric is not None:
+        with col_metric:
+            default_metric = chart.y if chart.y in metric_options else metric_options[0]
+            metric_choice = st.selectbox(
+                "Metric",
+                metric_options,
+                index=metric_options.index(default_metric),
+                key=f"trend-metric-{control_key}",
+            )
+            if metric_choice != chart.y:
+                updates["y"] = metric_choice
+
+    effective_y = updates.get("y", chart.y)
 
     with col_type:
         type_index = (
@@ -45,7 +67,7 @@ def _apply_trend_chart_controls(df: pd.DataFrame, chart, *, chart_key: str):
         if chart_type != chart.chart_type:
             updates["chart_type"] = chart_type
 
-    group_options = trend_group_options(df, chart, y_column=chart.y)
+    group_options = trend_group_options(df, chart, y_column=effective_y)
     with col_group:
         default_group = (
             chart.group_by if chart.group_by in group_options else "All groups"
@@ -196,23 +218,33 @@ def render_kpi_row(profile: dict) -> None:
     )
 
 
+def _resolve_chart_for_display(df: pd.DataFrame, chart, *, chart_key: str):
+    """Normalize, fall back if needed, and apply interactive trend controls."""
+    chart = normalize_chart_spec(df, chart)
+    is_valid, _ = validate_chart(df, chart)
+    if not is_valid:
+        fallback = build_chart_fallback(df, chart)
+        if fallback is not None:
+            chart = normalize_chart_spec(df, fallback)
+
+    if supports_trend_chart_controls(df, chart):
+        return _apply_trend_chart_controls(df, chart, chart_key=chart_key)
+    return chart
+
+
 def render_chart_card(df: pd.DataFrame, chart, *, chart_key: str) -> None:
     """Validate, render, and display a single recommended chart."""
-    chart = normalize_chart_spec(df, chart)
-
     with st.container(border=True):
-        if supports_trend_chart_controls(df, chart):
-            display_chart = _apply_trend_chart_controls(df, chart, chart_key=chart_key)
-        else:
-            display_chart = chart
-
-        st.subheader(chart_display_title(display_chart), divider=False)
-        st.caption(chart_display_reason(display_chart))
+        display_chart = _resolve_chart_for_display(df, chart, chart_key=chart_key)
 
         is_valid, error = validate_chart(df, display_chart)
         if not is_valid:
+            st.subheader(chart_display_title(display_chart), divider=False)
             st.warning(error or "Chart could not be displayed.")
             return
+
+        st.subheader(chart_display_title(display_chart), divider=False)
+        st.caption(chart_display_reason(display_chart))
 
         filter_period = None
         filter_granularity = None

@@ -30,11 +30,30 @@ HEADCOUNT_TITLE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+DISTRIBUTION_TITLE_PATTERN = re.compile(
+    r"\bdistribut",
+    re.IGNORECASE,
+)
+
+CORRELATION_TITLE_PATTERN = re.compile(
+    r"correl",
+    re.IGNORECASE,
+)
+
 # Synthetic datetime column created when Year and Month exist separately
 PERIOD_COLUMN = "_period"
 
 # Pie charts are hard to read beyond a handful of slices
 MAX_PIE_CATEGORIES = 6
+
+# Legend / Compare-by series above this count are unreadable and can break rendering
+MAX_GROUP_SERIES = 10
+
+# Placeholder x value for correlation heatmap charts (not a real dataframe column)
+CORRELATION_CHART_X = "_correlation_"
+
+# Cap heatmap size for wide datasets
+MAX_HEATMAP_COLUMNS = 15
 
 # min/max ratio above this threshold suggests a log y-axis
 LOG_SCALE_RATIO_THRESHOLD = 100
@@ -326,7 +345,134 @@ def supports_legend_filter(df: pd.DataFrame, chart) -> bool:
         return False
     if not chart.group_by or chart.group_by not in df.columns:
         return False
-    return df[chart.group_by].nunique(dropna=True) > 1
+    nunique = df[chart.group_by].nunique(dropna=True)
+    return 2 <= nunique <= MAX_GROUP_SERIES
+
+
+def is_valid_group_by_column(df: pd.DataFrame, column: str) -> bool:
+    """True when a column is suitable for Compare groups / legend series."""
+    if column not in df.columns or looks_like_id(column):
+        return False
+    if is_numeric_series(df[column]) or is_datetime_series(df[column]):
+        return False
+    if is_year_like_column(column, df[column]) or is_month_like_column(column):
+        return False
+    nunique = df[column].nunique(dropna=True)
+    return 2 <= nunique <= MAX_GROUP_SERIES
+
+
+def is_continuous_metric_column(df: pd.DataFrame, column: str) -> bool:
+    """True for numeric measurement columns (not time buckets, ids, or small ratings)."""
+    if column not in df.columns or not is_numeric_series(df[column]):
+        return False
+    if looks_like_id(column) or is_year_like_column(column, df[column]) or is_month_like_column(column):
+        return False
+    if is_datetime_series(df[column]):
+        return False
+    return not looks_like_rating_column(column, df[column])
+
+
+def correlation_metric_columns(df: pd.DataFrame) -> list[str]:
+    """Numeric columns for a correlation heatmap (scores/ratings included; variance-ranked if wide)."""
+    cols = numeric_metrics_for_charts(df)
+    if not cols:
+        return []
+    variances = df[cols].var(numeric_only=True)
+    cols = [col for col in cols if variances.get(col, 0) > 0]
+    if len(cols) <= MAX_HEATMAP_COLUMNS:
+        return cols
+    ranked = variances[cols].sort_values(ascending=False)
+    return ranked.head(MAX_HEATMAP_COLUMNS).index.tolist()
+
+
+def numeric_metrics_for_charts(df: pd.DataFrame) -> list[str]:
+    """Numeric columns usable on line/bar/scatter fallbacks (includes ratings)."""
+    year_col, month_col = find_year_month_columns(df)
+    skip = {c for c in (year_col, month_col) if c}
+    return [
+        col
+        for col in df.columns
+        if col not in skip
+        and is_numeric_series(df[col])
+        and not looks_like_id(col)
+        and not is_year_like_column(col, df[col])
+        and not is_month_like_column(col)
+    ]
+
+
+def find_time_axis_column(df: pd.DataFrame) -> str | None:
+    """Best x-axis column for a time-series fallback chart."""
+    year_col, month_col = find_year_month_columns(df)
+    if year_col and month_col:
+        return year_col
+    for col in df.columns:
+        if is_datetime_series(df[col]):
+            return col
+    return year_col
+
+
+def find_best_categorical_column(df: pd.DataFrame, skip: set[str] | None = None) -> str | None:
+    """Categorical column with the most groups (up to 20) for bar-chart fallbacks."""
+    skip = skip or set()
+    best_col = None
+    best_nunique = 0
+    for col in df.columns:
+        if col in skip or looks_like_id(col):
+            continue
+        if is_numeric_series(df[col]) or is_datetime_series(df[col]):
+            continue
+        if is_year_like_column(col, df[col]) or is_month_like_column(col):
+            continue
+        nunique = df[col].nunique(dropna=True)
+        if 2 <= nunique <= 20 and nunique > best_nunique:
+            best_col = col
+            best_nunique = nunique
+    return best_col
+
+
+def title_implies_distribution(title: str) -> bool:
+    """Chart title suggests a value distribution / histogram."""
+    return bool(DISTRIBUTION_TITLE_PATTERN.search(title))
+
+
+def title_implies_correlation(title: str) -> bool:
+    """Chart title suggests a correlation matrix / heatmap."""
+    return bool(CORRELATION_TITLE_PATTERN.search(title))
+
+
+def pick_distinct_metric_pair(
+    df: pd.DataFrame,
+    *,
+    preferred_x: str | None = None,
+    preferred_y: str | None = None,
+) -> tuple[str, str] | None:
+    """Return two different numeric metrics for a scatter plot, or None if unavailable."""
+    metrics = numeric_metrics_for_charts(df)
+    if len(metrics) < 2:
+        return None
+
+    ranked = df[metrics].var(numeric_only=True).sort_values(ascending=False).index.tolist()
+    x_col = preferred_x if preferred_x in metrics else ranked[0]
+    others = [col for col in ranked if col != x_col]
+    if not others:
+        return None
+
+    y_col = preferred_y if preferred_y in others else others[0]
+    return x_col, y_col
+
+
+def distribution_bar_updates(metric_col: str) -> dict:
+    """Chart spec fields for a binned count histogram of one numeric metric."""
+    return {
+        "chart_type": "bar",
+        "x": metric_col,
+        "y": None,
+        "aggregation": "count",
+        "group_by": None,
+        "bar_mode": None,
+        "time_column": None,
+        "log_y": False,
+    }
 
 
 def is_year_like_column(column: str, series: pd.Series) -> bool:
@@ -391,6 +537,17 @@ def supports_trend_chart_controls(df: pd.DataFrame, chart) -> bool:
     return chart.chart_type in ("line", "bar") and is_time_series_chart(df, chart)
 
 
+def time_trend_dedupe_key(df: pd.DataFrame, chart) -> tuple[str, str, str] | None:
+    """Collapse key for duplicate time-series charts sharing the same x-axis and compare-by."""
+    if not supports_trend_chart_controls(df, chart):
+        return None
+    if chart.aggregation == "count" and not chart.y:
+        return (chart.x, chart.group_by or "", "count")
+    if chart.y:
+        return (chart.x, chart.group_by or "", "metric")
+    return None
+
+
 TREND_CHART_TYPES = ["line", "bar"]
 
 
@@ -422,7 +579,7 @@ def trend_group_options(df: pd.DataFrame, chart, y_column: str | None = None) ->
         if is_year_like_column(col, df[col]) or is_month_like_column(col):
             continue
         nunique = df[col].nunique(dropna=True)
-        if 2 <= nunique <= 20:
+        if is_valid_group_by_column(df, col):
             options.append(col)
     return options
 
@@ -480,6 +637,8 @@ def _time_granularity_label(chart, df: pd.DataFrame) -> str | None:
 
 def sync_chart_title_from_y(chart, df: pd.DataFrame) -> str:
     """Rewrite LLM titles so the metric name matches chart.y."""
+    if chart.chart_type == "heatmap":
+        return chart.title.strip()
     if not chart.y:
         return chart.title.strip()
 
@@ -667,6 +826,33 @@ def build_chart_schema(df: pd.DataFrame) -> dict:
     ]
     if metric_cols:
         hints["metric_columns"] = metric_cols
+    time_x = find_time_axis_column(df)
+    trend_metrics = [
+        col
+        for col in numeric_metrics_for_charts(df)
+        if time_x and col != time_x
+    ]
+    if time_x and len(trend_metrics) > 1:
+        hints["wide_metric_trend_rule"] = (
+            f"Recommend exactly ONE line trend over {time_x!r} (pick the most important metric for y). "
+            "The dashboard provides a Metric dropdown to switch between metrics — "
+            "do NOT recommend separate line charts for each metric column."
+        )
+    corr_cols = correlation_metric_columns(df)
+    if len(corr_cols) >= 2:
+        hints["correlation_columns"] = corr_cols
+        hints["correlation_heatmap_rule"] = (
+            "Include exactly one chart with chart_type=heatmap, x='_correlation_', "
+            "aggregation=none, and y omitted. The heatmap correlates ALL columns listed "
+            "in correlation_columns (including scores and ratings)."
+        )
+    hints["continuous_data_rule"] = (
+        "For relationships between two continuous metrics, use chart_type=scatter with "
+        "aggregation=none and different x/y columns. For trends over a Date/datetime column, "
+        "use chart_type=line with aggregation=none. For the distribution of one numeric metric, "
+        "use chart_type=bar, x=metric, aggregation=count, y omitted. "
+        "Do NOT use bar or pie when both x and y are continuous numeric metrics."
+    )
 
     hints["pie_chart_max_categories"] = MAX_PIE_CATEGORIES
     hints["pie_chart_rule"] = (
@@ -696,12 +882,14 @@ def build_chart_schema(df: pd.DataFrame) -> dict:
         and not c.get("is_datetime")
         and not c.get("looks_like_id")
         and not c.get("is_year_like")
-        and 2 <= c.get("nunique", 0) <= 12
+        and 2 <= c.get("nunique", 0) <= MAX_GROUP_SERIES
     ]
     if group_candidates:
         hints["group_by_candidates"] = group_candidates
+        hints["max_group_series"] = MAX_GROUP_SERIES
         hints["comparison_chart_rule"] = (
-            "For group comparisons use bar or line with group_by (series column), "
+            f"For group comparisons use bar or line with group_by (series column, "
+            f"2–{MAX_GROUP_SERIES} groups only), "
             'bar_mode "group" for clustered/side-by-side bars or "stack" for stacked bars/columns.'
         )
 

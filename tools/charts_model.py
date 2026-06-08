@@ -7,7 +7,7 @@ from pydantic import BaseModel, field_validator
 # Allowed values enforced on parsed LLM output
 Aggregation = Literal["none", "count", "sum", "mean"]
 TimeFreq = Literal["D", "W", "ME", "QE", "YE"]
-ChartType = Literal["line", "bar", "pie", "scatter"]
+ChartType = Literal["line", "bar", "pie", "scatter", "heatmap"]
 BarMode = Literal["group", "stack"]
 
 
